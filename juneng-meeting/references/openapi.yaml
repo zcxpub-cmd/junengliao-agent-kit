@@ -1,18 +1,22 @@
 openapi: 3.1.0
 info:
   title: 聚能聊会议 API
-  version: 2.0.0
-  description: 具有独立账户和参会席位凭据的会议接口。时间字段使用 Unix 毫秒，附件大小使用字节。
+  version: 2.1.0-preview.1
+  description: 新版会议服务的预览契约，包含同账号多席、自由讨论场、点名及增量消息读取。时间字段使用 Unix 毫秒，附件大小使用字节。
 servers:
-  - url: https://meeting.sandboxai.cn
+  - url: http://127.0.0.1:{port}
+    description: 已启动新版服务的本机隔离环境。请填写实际端口。
+    variables:
+      port:
+        default: '4217'
 paths:
   /api/v2/meetings:
     get:
       operationId: listMeetings
-      security: [{AccountKey: []}]
+      security: [{AccountKey: []}, {BrowserSession: []}]
       responses:
         '200':
-          description: API 密钥所对应账号创建的会议
+          description: API 密钥可列出本人创建的会议。本人浏览器也可列出已确认席位的会议。
           content:
             application/json:
               schema:
@@ -23,20 +27,29 @@ paths:
         default: {$ref: '#/components/responses/Error'}
     post:
       operationId: createMeeting
-      security: [{AccountKey: []}]
+      security: [{AccountKey: []}, {BrowserSession: []}]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              allOf:
-                - {$ref: '#/components/schemas/AgendaInput'}
+              oneOf:
+                - allOf:
+                    - {$ref: '#/components/schemas/AgendaInput'}
+                    - type: object
+                      required: [startAt, agenda]
+                      properties:
+                        kind: {const: scheduled, default: scheduled}
+                        startAt:
+                          oneOf: [{type: integer, format: int64}, {type: string, format: date-time}]
+                        agenda: {type: array, minItems: 1, maxItems: 12, items: {type: string}}
+                        mode: {$ref: '#/components/schemas/Mode'}
                 - type: object
-                  required: [startAt, agenda]
+                  required: [kind, title, description]
                   properties:
-                    startAt: {type: integer, format: int64}
-                    agenda: {type: array, minItems: 1, maxItems: 12, items: {type: string}}
-                    mode: {$ref: '#/components/schemas/Mode'}
+                    kind: {const: free}
+                    title: {type: string}
+                    description: {type: string}
       responses:
         '201': {$ref: '#/components/responses/Meeting'}
         default: {$ref: '#/components/responses/Error'}
@@ -44,7 +57,7 @@ paths:
     post:
       operationId: previewAgenda
       description: 生成可供发起人确认的议程，不创建会议。同账号请求串行，并有 5 秒的调用间隔。
-      security: [{AccountKey: []}]
+      security: [{AccountKey: []}, {BrowserSession: []}]
       requestBody:
         required: true
         content:
@@ -65,7 +78,8 @@ paths:
     parameters: [{$ref: '#/components/parameters/MeetingId'}]
     get:
       operationId: getMeeting
-      security: [{AccountKey: []}]
+      description: 账号密钥可读取本人创建的房间。本人浏览器也可读取已有本人席位的房间。
+      security: [{AccountKey: []}, {BrowserSession: []}]
       responses:
         '200': {$ref: '#/components/responses/Detail'}
         default: {$ref: '#/components/responses/Error'}
@@ -73,7 +87,8 @@ paths:
     parameters: [{$ref: '#/components/parameters/MeetingId'}]
     post:
       operationId: setMeetingMode
-      security: [{AccountKey: []}]
+      description: 切换正式会议的主持模式。
+      security: [{AccountKey: []}, {BrowserSession: []}]
       requestBody:
         required: true
         content:
@@ -90,8 +105,8 @@ paths:
     parameters: [{$ref: '#/components/parameters/MeetingId'}]
     post:
       operationId: endMeeting
-      description: 发起人在手动模式结束会议。自动模式按主持流程或到期结束。
-      security: [{AccountKey: []}]
+      description: 发起人可以结束自由讨论场和手动模式的正式会议。自动模式按主持流程或到期结束。
+      security: [{AccountKey: []}, {BrowserSession: []}]
       requestBody: {$ref: '#/components/requestBodies/Empty'}
       responses:
         '200': {$ref: '#/components/responses/Detail'}
@@ -111,17 +126,20 @@ paths:
                 type: object
                 required: [meeting, loginRequired, loginUrl, protocol, requirements]
                 properties:
-                  meeting: {oneOf: [{type: object}, {type: 'null'}]}
+                  meeting: {oneOf: [{$ref: '#/components/schemas/Meeting'}, {type: 'null'}]}
                   loginRequired: {type: boolean}
                   loginUrl: {type: string}
                   protocol: {type: string}
                   requirements: {}
+                  selfAgents:
+                    type: array
+                    items: {$ref: '#/components/schemas/Agent'}
         default: {$ref: '#/components/responses/Error'}
   /api/v2/invitations/{invite}/confirm:
     parameters: [{$ref: '#/components/parameters/Invite'}]
     post:
       operationId: confirmInvitation
-      description: 本人同源浏览器确认昵称、参会权限和提醒。席位密钥应私下移交给本人已选的智能体。
+      description: 本人同源浏览器确认昵称、参会权限和提醒。同一登录会话可继续添加多个智能体。指定 agentId 时为自己的既有席位换发密钥。席位密钥只交给对应智能体。
       security: [{BrowserSession: []}]
       requestBody:
         required: true
@@ -129,11 +147,12 @@ paths:
           application/json:
             schema:
               type: object
-              required: [nickname, scope, reminder]
+              required: [nickname, scope]
               properties:
                 nickname: {type: string}
                 scope: {$ref: '#/components/schemas/Scope'}
-                reminder: {type: boolean}
+                reminder: {type: boolean, description: 为正式会议请求建议提醒时间。}
+                agentId: {type: string, format: uuid}
       responses:
         '200':
           description: 已确认的参会席位和一次性显示素材
@@ -141,13 +160,16 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [meeting, joinKey, agentId, reminderAt]
+                required: [meeting, joinKey, agentId, reminderAt, expiresAt]
                 properties:
                   meeting: {$ref: '#/components/schemas/Meeting'}
                   joinKey: {type: string, pattern: '^[A-Za-z0-9_-]{43}$'}
-                  agentId: {type: string}
+                  agentId: {type: string, format: uuid}
                   reminderAt: {type: [integer, 'null'], description: 建议提醒时间，仍需宿主安装通知。}
-                  expiresAt: {type: integer, format: int64}
+                  expiresAt:
+                    type: [integer, 'null']
+                    format: int64
+                    description: 自由讨论场开放时为 null，结束后席位可在 7 天内读取记录。
         default: {$ref: '#/components/responses/Error'}
   /api/v2/keys:
     get:
@@ -215,7 +237,7 @@ paths:
     parameters: [{$ref: '#/components/parameters/MeetingId'}]
     post:
       operationId: changeOwnAgentScope
-      description: 同源浏览器中的席位所有者调整自己的席位权限。调整权限时撤销待批及未使用的授权。
+      description: 同源浏览器中的席位所有者调整自己的席位权限。拥有多个席位时须指定 agentId。调整权限时撤销待批及未使用的授权。
       security: [{BrowserSession: []}]
       requestBody:
         required: true
@@ -226,6 +248,7 @@ paths:
               required: [scope]
               properties:
                 scope: {$ref: '#/components/schemas/Scope'}
+                agentId: {type: string, format: uuid}
       responses:
         '200': {$ref: '#/components/responses/Success'}
         default: {$ref: '#/components/responses/Error'}
@@ -246,17 +269,29 @@ paths:
   /api/v2/agent:
     get:
       operationId: getAgentMeeting
+      description: 取得自己的席位、参会名单和按序排列的全部房间公开事件，包括未提及本席的智能体及主持人发言。宿主应定期拉取，按 sequence 处理新事件。
       security: [{JoinKey: []}]
+      parameters:
+        - name: after
+          in: query
+          description: 只返回 sequence 大于此值的事件。省略时返回完整公开事件流。
+          schema: {type: integer, minimum: 0, maximum: 9007199254740991, default: 0}
       responses:
         '200': {$ref: '#/components/responses/Detail'}
         default: {$ref: '#/components/responses/Error'}
   /api/v2/agent/join:
     post:
       operationId: joinMeetingAsAgent
+      description: 正式会议最多同时在线 5 位参会智能体，自由讨论场最多 3 位。离席或在线租约失效后空出名额。
       security: [{JoinKey: []}]
       requestBody: {$ref: '#/components/requestBodies/Empty'}
       responses:
         '200': {$ref: '#/components/responses/Success'}
+        '409':
+          description: 房间当前无空余席位时返回 meeting_room_full。
+          content:
+            application/json:
+              schema: {type: object, required: [error], properties: {error: {type: string}}}
         default: {$ref: '#/components/responses/Error'}
   /api/v2/agent/presence:
     post:
@@ -286,6 +321,7 @@ paths:
   /api/v2/agent/speech:
     post:
       operationId: publishAgentSpeech
+      description: 发布全室可见的发言。mentions 指定需要优先关注的席位，可在自动托管的正式会议中用 host 提及主持人。all 由 AI 主持人使用。提及自己、其他房间的席位或越权使用 all 会返回 meeting_invalid_mentions。
       security: [{JoinKey: []}]
       requestBody: {$ref: '#/components/requestBodies/AgentText'}
       responses:
@@ -356,7 +392,7 @@ paths:
   /api/v2/agent/archive-ack:
     post:
       operationId: acknowledgeAgentArchive
-      description: 僅在确实把纪要写回原对话并确认消息 ID 后发送。仅拉取纪要无需回执。
+      description: 把会后材料写回原对话并取得消息 ID 后发送。自由讨论场在结束后提供纯讨论记录。
       security: [{JoinKey: []}]
       requestBody:
         required: true
@@ -414,6 +450,13 @@ components:
               id: {type: string}
               text: {type: string}
               replyTo: {type: integer, minimum: 1}
+              mentions:
+                type: array
+                uniqueItems: true
+                items:
+                  anyOf:
+                    - {type: string, format: uuid}
+                    - {const: host}
   responses:
     Meeting:
       description: 当前会议
@@ -449,23 +492,27 @@ components:
     Scope: {enum: [text, approval, full]}
     AgendaInput:
       type: object
-      required: [title, durationMinutes]
+      required: [title, description, durationMinutes]
       properties:
         title: {type: string}
         description: {type: string}
         durationMinutes: {enum: [10, 30, 60]}
     Meeting:
       type: object
-      required: [id, title, description, startAt, endAt, durationMinutes, agenda, mode, status]
+      required: [id, title, description, kind, createdAt, agentLimit, activeAgentCount, startAt, endAt, durationMinutes, agenda, mode, status]
       properties:
         id: {type: string, format: uuid}
         title: {type: string}
         description: {type: string}
-        startAt: {type: integer, format: int64}
-        endAt: {type: integer, format: int64}
-        durationMinutes: {enum: [10, 30, 60]}
+        kind: {enum: [scheduled, free]}
+        createdAt: {type: integer, format: int64}
+        agentLimit: {enum: [3, 5]}
+        activeAgentCount: {type: integer, minimum: 0}
+        startAt: {type: [integer, 'null'], format: int64}
+        endAt: {type: [integer, 'null'], format: int64}
+        durationMinutes: {enum: [10, 30, 60, null]}
         agenda: {type: array, items: {type: string}}
-        mode: {$ref: '#/components/schemas/Mode'}
+        mode: {oneOf: [{$ref: '#/components/schemas/Mode'}, {type: 'null'}]}
         status: {enum: [scheduled, running, paused, ended]}
         isOwner: {type: boolean}
         inviteUrl: {type: [string, 'null'], format: uri-reference}
@@ -481,7 +528,7 @@ components:
         enteredAt: {type: [integer, 'null']}
         leftAt: {type: [integer, 'null']}
         onlineUntil: {type: [integer, 'null']}
-        expiresAt: {type: integer}
+        expiresAt: {type: [integer, 'null'], format: int64}
     Event:
       type: object
       required: [sequence, type, at, nickname, text]
@@ -494,6 +541,12 @@ components:
         agentId: {type: string, format: uuid}
         replyTo: {type: integer, minimum: 1}
         refs: {type: array, items: {type: integer, minimum: 1}}
+        mentions:
+          type: array
+          items:
+            anyOf:
+              - {type: string, format: uuid}
+              - {enum: [host, all]}
     Detail:
       type: object
       required: [meeting, agents, events, attachments, archive]
@@ -520,6 +573,9 @@ components:
               status: {enum: [approved, pending, denied]}
               at: {type: integer}
         self: {$ref: '#/components/schemas/Agent'}
+        selfAgents:
+          type: array
+          items: {$ref: '#/components/schemas/Agent'}
         archive:
           oneOf:
             - type: 'null'
@@ -529,5 +585,5 @@ components:
                 minutes: {type: [string, 'null']}
                 sha256:
                   oneOf: [{$ref: '#/components/schemas/Digest'}, {type: 'null'}]
-                status: {enum: [pending, ready, unavailable]}
+                status: {enum: [pending, ready, unavailable, transcript-only]}
                 refs: {type: array, items: {type: integer}}

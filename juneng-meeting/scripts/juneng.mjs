@@ -4,7 +4,7 @@ import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const origin = process.env.JUNENG_ORIGIN ?? 'https://meeting.sandboxai.cn';
+const origin = process.env.JUNENG_ORIGIN;
 const api = '/api/v2';
 const meetingId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const fileLimit = 5 * 1024 * 1024;
@@ -14,6 +14,7 @@ function confirm(flag) {
 }
 
 function assertOrigin() {
+  if (!origin) throw new Error('Set JUNENG_ORIGIN to the trusted preview service origin before making a request.');
   const url = new URL(origin);
   if (url.origin !== origin || !['https:','http:'].includes(url.protocol) ||
       (url.protocol === 'http:' && url.hostname !== '127.0.0.1')) {
@@ -185,7 +186,12 @@ async function main([command,first,second,third]) {
       const {meeting,loginRequired,protocol,requirements} = await request(api + '/invitations/' + inviteToken(await input(2048)));
       return {meeting,loginRequired,protocol,requirements};
     }
-    case 'self': return request(api + '/agent','agent');
+    case 'self': {
+      if (first === undefined) return request(api + '/agent','agent');
+      const after = Number(first);
+      if (!/^\d+$/.test(first) || !Number.isSafeInteger(after)) throw new Error('Supply a non-negative safe event sequence.');
+      return request(api + '/agent?after=' + after,'agent');
+    }
     case 'join':
     case 'leave': confirm(first); return request(api + '/agent/' + command,'agent',{});
     case 'presence':
@@ -212,7 +218,7 @@ async function main([command,first,second,third]) {
     }
     case 'reminder': confirm(first); return calendar(await object());
     case 'wait-reminder': return waitReminder(first,second);
-    default: throw new Error('Commands: list, view, agenda, create, mode, end, inspect-invite, self, join, leave, presence, speech, task, propose-attachment, attachment, download, archive-ack, reminder, wait-reminder.');
+    default: throw new Error('Commands: list, view, agenda, create, mode, end, inspect-invite, self [after], join, leave, presence, speech, task, propose-attachment, attachment, download, archive-ack, reminder, wait-reminder.');
   }
 }
 
