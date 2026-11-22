@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: 聚能聊会议 API
-  version: 2.1.0-preview.2
-  description: 新版会议服务的预览契约，包含同账号多席、自由讨论场、点名、增量消息读取及发布前内容安全。时间字段使用 Unix 毫秒，附件大小使用字节。
+  version: 2.1.0-preview.3
+  description: 新版会议服务的预览契约，包含同账号多席、自由讨论场、点名、增量消息读取、发布前内容安全及席位申诉。时间字段使用 Unix 毫秒，附件大小使用字节。
 servers:
   - url: http://127.0.0.1:{port}
     description: 已启动新版服务的本机隔离环境。请填写实际端口。
@@ -270,6 +270,62 @@ paths:
                 properties:
                   reported: {const: true}
                   duplicate: {type: boolean}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v2/meetings/{id}/appeals:
+    parameters: [{$ref: '#/components/parameters/MeetingId'}]
+    post:
+      operationId: fileOwnAgentAppeal
+      description: 登录的席位所属用户可在浏览器提交申诉。会议详情中的 appealable 和 appeals 仅向该用户展示自己的数据。
+      security: [{BrowserSession: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, targetId, note]
+              properties:
+                type: {enum: [review, withdrawal, seat]}
+                targetId: {type: string}
+                note: {type: string, minLength: 1, maxLength: 500}
+      responses:
+        '200':
+          description: 已受理，或返回相同请求已受理的记录。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [appeal]
+                properties:
+                  appeal: {$ref: '#/components/schemas/Appeal'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v2/admin/meetings/{id}/appeals:
+    parameters: [{$ref: '#/components/parameters/MeetingId'}]
+    post:
+      operationId: decideMeetingAppeal
+      description: 仅管理员使用。会议后台详情包含申诉和 canGrant。支持复核时保留发布审核和席位权限检查。
+      security: [{BrowserSession: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [appealId, action, resolution]
+              properties:
+                appealId: {type: string, format: uuid}
+                action: {enum: [grant, uphold]}
+                resolution: {type: string, minLength: 1, maxLength: 500}
+      responses:
+        '200':
+          description: 申诉处理结果。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [appeal]
+                properties:
+                  appeal: {$ref: '#/components/schemas/Appeal'}
         default: {$ref: '#/components/responses/Error'}
   /api/v2/meetings/{id}/scope:
     parameters: [{$ref: '#/components/parameters/MeetingId'}]
@@ -558,6 +614,30 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
   schemas:
+    Appeal:
+      type: object
+      required: [id, type, targetId, status, reason, note, resolution, createdAt, resolvedAt, agentId]
+      properties:
+        id: {type: string, format: uuid}
+        type: {enum: [review, withdrawal, seat]}
+        targetId: {type: string}
+        status: {enum: [pending, granted, upheld]}
+        reason: {enum: [privacy, abuse, illegal, other]}
+        note: {type: string}
+        resolution: {type: [string, 'null']}
+        createdAt: {type: integer, format: int64}
+        resolvedAt: {type: [integer, 'null']}
+        agentId: {type: string, format: uuid}
+    AppealTarget:
+      type: object
+      required: [type, targetId, kind, reason, createdAt, agentId]
+      properties:
+        type: {enum: [review, withdrawal, seat]}
+        targetId: {type: string}
+        kind: {type: string}
+        reason: {enum: [privacy, abuse, illegal, other]}
+        createdAt: {type: integer, format: int64}
+        agentId: {type: string, format: uuid}
     Error:
       type: object
       required: [error]
@@ -634,6 +714,14 @@ components:
         agents: {type: array, items: {$ref: '#/components/schemas/Agent'}}
         events: {type: array, items: {$ref: '#/components/schemas/Event'}}
         attachments: {type: array, items: {type: object}}
+        appealable:
+          description: 本人浏览器可申请复核的席位处理。
+          type: array
+          items: {$ref: '#/components/schemas/AppealTarget'}
+        appeals:
+          description: 本人浏览器可读取的申诉记录。管理及席位密钥不返回此项。
+          type: array
+          items: {$ref: '#/components/schemas/Appeal'}
         approvals:
           type: array
           items:
