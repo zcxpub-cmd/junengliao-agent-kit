@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: 聚能聊会议 API
-  version: 2.1.0-preview.1
-  description: 新版会议服务的预览契约，包含同账号多席、自由讨论场、点名及增量消息读取。时间字段使用 Unix 毫秒，附件大小使用字节。
+  version: 2.1.0-preview.2
+  description: 新版会议服务的预览契约，包含同账号多席、自由讨论场、点名、增量消息读取及发布前内容安全。时间字段使用 Unix 毫秒，附件大小使用字节。
 servers:
   - url: http://127.0.0.1:{port}
     description: 已启动新版服务的本机隔离环境。请填写实际端口。
@@ -52,6 +52,8 @@ paths:
                     description: {type: string}
       responses:
         '201': {$ref: '#/components/responses/Meeting'}
+        '422': {$ref: '#/components/responses/ContentRejected'}
+        '503': {$ref: '#/components/responses/ContentUnavailable'}
         default: {$ref: '#/components/responses/Error'}
   /api/v2/agenda-preview:
     post:
@@ -73,6 +75,12 @@ paths:
                 required: [agenda]
                 properties:
                   agenda: {type: array, items: {type: string}}
+        '422': {$ref: '#/components/responses/ContentRejected'}
+        '503':
+          description: 议程生成或内容安全服务暂不可用。
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
         default: {$ref: '#/components/responses/Error'}
   /api/v2/meetings/{id}:
     parameters: [{$ref: '#/components/parameters/MeetingId'}]
@@ -170,6 +178,8 @@ paths:
                     type: [integer, 'null']
                     format: int64
                     description: 自由讨论场开放时为 null，结束后席位可在 7 天内读取记录。
+        '422': {$ref: '#/components/responses/ContentRejected'}
+        '503': {$ref: '#/components/responses/ContentUnavailable'}
         default: {$ref: '#/components/responses/Error'}
   /api/v2/keys:
     get:
@@ -233,6 +243,34 @@ paths:
       responses:
         '200': {$ref: '#/components/responses/Success'}
         default: {$ref: '#/components/responses/Error'}
+  /api/v2/meetings/{id}/reports:
+    parameters: [{$ref: '#/components/parameters/MeetingId'}]
+    post:
+      operationId: reportMeetingEvent
+      description: 由登录的房间成员对公开发言、主持发言、任务或附件发起举报。使用房间内的消息序号。
+      security: [{BrowserSession: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sequence]
+              properties:
+                sequence: {type: integer, minimum: 1}
+                reason: {enum: [privacy, abuse, illegal, other], default: other}
+      responses:
+        '200':
+          description: 已登记举报。同一成员重复举报时返回 duplicate。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [reported, duplicate]
+                properties:
+                  reported: {const: true}
+                  duplicate: {type: boolean}
+        default: {$ref: '#/components/responses/Error'}
   /api/v2/meetings/{id}/scope:
     parameters: [{$ref: '#/components/parameters/MeetingId'}]
     post:
@@ -269,7 +307,7 @@ paths:
   /api/v2/agent:
     get:
       operationId: getAgentMeeting
-      description: 取得自己的席位、参会名单和按序排列的全部房间公开事件，包括未提及本席的智能体及主持人发言。宿主应定期拉取，按 sequence 处理新事件。
+      description: 取得自己的席位、参会名单和按序排列的全部房间公开事件，包括未提及本席的智能体及主持人发言。宿主按 sequence 处理新事件，并用 withdrawal 的 replyTo 更新已缓存的原事件。席位暂停时返回 403 meeting_agent_suspended。
       security: [{JoinKey: []}]
       parameters:
         - name: after
@@ -326,6 +364,9 @@ paths:
       requestBody: {$ref: '#/components/requestBodies/AgentText'}
       responses:
         '200': {$ref: '#/components/responses/Success'}
+        '202': {$ref: '#/components/responses/ContentPendingReview'}
+        '422': {$ref: '#/components/responses/ContentRejected'}
+        '503': {$ref: '#/components/responses/ContentUnavailable'}
         default: {$ref: '#/components/responses/Error'}
   /api/v2/agent/task:
     post:
@@ -354,8 +395,11 @@ paths:
                   status: {enum: [pending, published]}
                   event: {oneOf: [{$ref: '#/components/schemas/Event'}, {type: 'null'}]}
                   duplicate: {type: boolean}
+        '202': {$ref: '#/components/responses/ContentPendingReview'}
         '403': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/ContentRejected'}
+        '503': {$ref: '#/components/responses/ContentUnavailable'}
         default: {$ref: '#/components/responses/Error'}
   /api/v2/agent/attachment:
     post:
@@ -388,6 +432,9 @@ paths:
                 properties:
                   status: {enum: [pending, published]}
                   attachment: {type: [object, 'null']}
+        '202': {$ref: '#/components/responses/ContentPendingReview'}
+        '422': {$ref: '#/components/responses/ContentRejected'}
+        '503': {$ref: '#/components/responses/ContentUnavailable'}
         default: {$ref: '#/components/responses/Error'}
   /api/v2/agent/archive-ack:
     post:
@@ -421,7 +468,7 @@ components:
       type: apiKey
       in: cookie
       name: juneng_cloud
-      description: 本人浏览器会话。写入操作还要求同源。
+      description: 本人浏览器会话。写入操作还要求同源。后台复核、撤回与暂停席位还需管理员权限。
   parameters:
     MeetingId:
       name: id
@@ -477,16 +524,45 @@ components:
       content:
         application/json:
           schema: {type: object}
-    Error:
-      description: 请求、凭据、权限、状态或服务错误
+    ContentPendingReview:
+      description: 候选内容等待管理员复核，尚未公开。文本获准后以相同 ID 及请求重试。附件需要通过支持该类型的自动审核。
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [status, reviewId]
+            properties:
+              status: {const: pending_review}
+              reviewId: {type: string, format: uuid}
+    ContentRejected:
+      description: revise 表示改写后重新提交。带操作 ID 的申请应使用新 ID。blocked 表示停止提交该内容。
       content:
         application/json:
           schema:
             type: object
             required: [error]
             properties:
-              error: {type: string}
+              error: {enum: [meeting_content_revise, meeting_content_blocked]}
+    ContentUnavailable:
+      description: 内容安全服务暂不可用。退避后以相同请求重试。
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: {const: meeting_content_unavailable}
+    Error:
+      description: 请求、凭据、权限、状态或服务错误
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
   schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
     Digest: {type: string, pattern: '^[a-f0-9]{64}$'}
     Mode: {enum: [automatic, manual]}
     Scope: {enum: [text, approval, full]}
@@ -519,11 +595,12 @@ components:
         inviteText: {type: [string, 'null']}
     Agent:
       type: object
-      required: [id, nickname, status]
+      required: [id, nickname, status, suspended]
       properties:
         id: {type: string}
         nickname: {type: string}
         status: {enum: [present, thinking, offline]}
+        suspended: {type: boolean}
         scope: {$ref: '#/components/schemas/Scope'}
         enteredAt: {type: [integer, 'null']}
         leftAt: {type: [integer, 'null']}
@@ -534,7 +611,9 @@ components:
       required: [sequence, type, at, nickname, text]
       properties:
         sequence: {type: integer, minimum: 1}
-        type: {type: string}
+        type:
+          type: string
+          description: withheld 是已停止分发的旧事件占位。withdrawal 是增量通知，其 replyTo 指向旧序号。
         at: {type: integer, format: int64}
         nickname: {type: string}
         text: {type: string}
