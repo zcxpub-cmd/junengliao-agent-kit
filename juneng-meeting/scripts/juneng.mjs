@@ -8,6 +8,30 @@ const origin = process.env.JUNENG_ORIGIN;
 const api = '/api/v2';
 const meetingId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const fileLimit = 5 * 1024 * 1024;
+const feedbackKinds = {speech:'发言',task:'任务',attachment:'附件',seat:'席位'};
+const feedbackReasons = {privacy:'涉及隐私',abuse:'涉及骚扰或辱骂',illegal:'涉嫌违法',other:''};
+const feedbackMessages = {
+  pass:'审核通过，已发布。',
+  pending:'等待人工复核，内容尚未发布。',
+  revise:'需要改写，内容尚未发布。修改后须使用新请求 ID。',
+  blocked:'审核拦截，内容尚未发布。停止重发该内容。',
+  unavailable:'审核暂不可用，内容尚未发布。可在原授权仍有效时稍后以相同请求重试。',
+  allowed:'人工复核已通过。以原请求 ID 和原内容重试，收到发布回执后再确认已公开。',
+  expired:'人工复核已过期。内容尚未发布。',
+  reported:'该内容已被举报，等待管理员处理。',
+  dismissed:'管理员已驳回举报。',
+  withdrawn:'管理员已停止分发。请停止引用和转发该内容。',
+  appeal_pending:'申诉已提交，等待管理员处理。',
+  appeal_granted:'申诉已支持。请让所属用户在会议页查看复核结果及适用的下一步。',
+  appeal_upheld:'维持原处理。请让所属用户在会议页查看复核结果。',
+  suspended:'席位已暂停。请停止提交并等待管理员恢复。',
+  restored:'席位已恢复。可在原授权范围内重新入会。',
+  warning:'收到审核提醒。请核对本条实际发布状态和会议规则。',
+};
+const legacyFeedback = {
+  meeting_content_revise:'revise',meeting_content_blocked:'blocked',
+  meeting_content_unavailable:'unavailable',meeting_agent_suspended:'suspended',
+};
 
 function confirm(flag) {
   if (flag !== '--confirm') throw new Error('This operation requires the user authorization indicated by --confirm.');
@@ -45,6 +69,35 @@ async function object(maximum) {
   return value;
 }
 
+function safeFeedback(value) {
+  if (!value || !Number.isSafeInteger(value.sequence) || value.sequence < 1 ||
+      !Number.isSafeInteger(value.createdAt) || value.createdAt < 0 ||
+      typeof value.agentId !== 'string' || !meetingId.test(value.agentId) ||
+      typeof value.kind !== 'string' || typeof value.status !== 'string' || typeof value.reason !== 'string' ||
+      !Object.hasOwn(feedbackKinds,value.kind) || !Object.hasOwn(feedbackMessages,value.status) ||
+      !Object.hasOwn(feedbackReasons,value.reason)) return null;
+  const {sequence,agentId,kind,status,reason,createdAt,clientId,reviewId,eventSequence,appealId,resolution} = value;
+  const explanation = ['appeal_granted','appeal_upheld'].includes(status) && typeof resolution === 'string'
+    && Array.from(resolution).length <= 500 && resolution.replace(/[\p{Cc}\p{Cf}]+/gu,' ').trim();
+  return {sequence,agentId,kind,status,reason,createdAt,
+    ...(typeof clientId === 'string' && /^[a-zA-Z0-9_.:-]{1,128}$/.test(clientId) && {clientId}),
+    ...(typeof reviewId === 'string' && meetingId.test(reviewId) && {reviewId}),
+    ...(Number.isSafeInteger(eventSequence) && eventSequence > 0 && {eventSequence}),
+    ...(typeof appealId === 'string' && meetingId.test(appealId) && {appealId}),
+    ...(explanation && {resolution:explanation})};
+}
+
+function showFeedback(rows, fallback) {
+  for (const row of rows) {
+    const target = row.clientId ? ' · 请求 ' + row.clientId : '';
+    const reason = feedbackReasons[row.reason];
+    const explanation = row.resolution ? '人工复核说明：「' + row.resolution + '」' : '';
+    console.error('【聚能聊私下审核反馈 #' + row.sequence + '】' + feedbackKinds[row.kind] + target + '：' +
+      feedbackMessages[row.status] + (reason ? '原因：' + reason + '。' : '') + explanation);
+  }
+  if (rows.length === 0 && fallback) console.error('【聚能聊私下审核反馈】' + feedbackMessages[fallback]);
+}
+
 async function request(path, kind, body, binary = false) {
   assertOrigin();
   const target = new URL(path, origin);
@@ -58,10 +111,22 @@ async function request(path, kind, body, binary = false) {
   });
   if (!response.ok) {
     const info = await response.json().catch(() => null);
-    const code = /^[a-z_]{2,90}$/.test(info?.error ?? '') ? ' ' + info.error : '';
+    if (kind === 'agent') {
+      const rows = Array.isArray(info?.moderationFeedback) ? info.moderationFeedback.map(safeFeedback).filter(Boolean) : [];
+      const fallback = typeof info?.error === 'string' && Object.hasOwn(legacyFeedback,info.error) ? legacyFeedback[info.error] : null;
+      showFeedback(rows,fallback);
+    }
+    const code = typeof info?.error === 'string' && /^[a-z_]{2,90}$/.test(info.error) ? ' ' + info.error : '';
     throw new Error(`API request failed (${response.status})${code}.`);
   }
-  return binary ? Buffer.from(await response.arrayBuffer()) : response.json();
+  if (binary) return Buffer.from(await response.arrayBuffer());
+  const result = await response.json();
+  if (kind === 'agent' && body !== undefined) {
+    const rows = Array.isArray(result?.moderationFeedback) ? result.moderationFeedback.map(safeFeedback).filter(Boolean) : [];
+    if (Array.isArray(result?.moderationFeedback)) result.moderationFeedback = rows;
+    showFeedback(rows,result?.status === 'pending_review' ? 'pending' : null);
+  }
+  return result;
 }
 
 function room(id) {
@@ -192,6 +257,18 @@ async function main([command,first,second,third]) {
       if (!/^\d+$/.test(first) || !Number.isSafeInteger(after)) throw new Error('Supply a non-negative safe event sequence.');
       return request(api + '/agent?after=' + after,'agent');
     }
+    case 'feedback': {
+      const after = first === undefined ? 0 : Number(first);
+      if ((first !== undefined && !/^\d+$/.test(first)) || !Number.isSafeInteger(after)) {
+        throw new Error('审核反馈游标必须是非负安全整数。');
+      }
+      const result = await request(api + '/agent/feedback?after=' + after,'agent');
+      const rows = Array.isArray(result?.moderationFeedback) ? result.moderationFeedback.map(safeFeedback) : null;
+      if (!rows || rows.some((row,index) => row?.sequence !== after + index + 1) ||
+          result.nextAfter !== after + rows.length) throw new Error('审核反馈暂无法核实。保留原游标后重试。');
+      showFeedback(rows);
+      return {moderationFeedback:rows,nextAfter:result.nextAfter};
+    }
     case 'join':
     case 'leave': confirm(first); return request(api + '/agent/' + command,'agent',{});
     case 'presence':
@@ -218,7 +295,7 @@ async function main([command,first,second,third]) {
     }
     case 'reminder': confirm(first); return calendar(await object());
     case 'wait-reminder': return waitReminder(first,second);
-    default: throw new Error('Commands: list, view, agenda, create, mode, end, inspect-invite, self [after], join, leave, presence, speech, task, propose-attachment, attachment, download, archive-ack, reminder, wait-reminder.');
+    default: throw new Error('Commands: list, view, agenda, create, mode, end, inspect-invite, self [after], feedback [after], join, leave, presence, speech, task, propose-attachment, attachment, download, archive-ack, reminder, wait-reminder.');
   }
 }
 
