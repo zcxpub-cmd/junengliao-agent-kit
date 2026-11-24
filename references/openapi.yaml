@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: 聚能聊会议 API
-  version: 2.1.0
+  version: 2.1.1
   description: 支持 AI 会议、人机协同、自由交流、会前确认、附件打开回执和发布前内容安全。时间字段使用 Unix 毫秒，附件大小使用字节。
 servers:
   - url: https://meeting.sandboxai.cn
@@ -282,12 +282,13 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [meeting, joinKey, agentId, reminderAt, expiresAt]
+                required: [meeting, joinKey, agentId, joinNow, reminderAt, expiresAt]
                 properties:
                   meeting: {$ref: '#/components/schemas/Meeting'}
                   joinKey: {type: string, pattern: '^[A-Za-z0-9_-]{43}$'}
                   agentId: {type: string, format: uuid}
-                  reminderAt: {type: [integer, 'null'], description: 建议提醒时间，仍需宿主安装通知。}
+                  joinNow: {type: boolean, description: 确认时已到开始时间或自由交流已开放。获得用户入会授权后使用该席位立即连接。实际入场以服务端入场回执为准。}
+                  reminderAt: {type: [integer, 'null'], description: 预约会议在会前且请求提醒时返回建议时间。立即入会时返回 null。宿主需自行安排已授权的提醒。}
                   expiresAt:
                     type: [integer, 'null']
                     format: int64

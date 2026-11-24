@@ -196,14 +196,17 @@ async function share(command, flag) {
   return request(api + '/agent/attachment','agent',value);
 }
 
+const joinNowMessage = '已到参会时间。已获本席入会授权时，请在原对话立即运行 presence-watch --confirm，并核对入会回执。';
+
 function reminderSchedule(value, now) {
   const {id,title,startAt,endAt} = value?.meeting ?? {};
   const at = value?.reminderAt ?? startAt;
   if (!meetingId.test(id ?? '') || typeof title !== 'string' || !title.trim() || Buffer.byteLength(title) > 240 ||
       ![startAt,endAt,at].every(value => Number.isSafeInteger(value) && Number.isFinite(new Date(value).getTime())) ||
-      startAt <= now || endAt <= startAt || at > startAt) {
-    throw new Error('Supply an upcoming meeting and an authorized reminder time in milliseconds.');
+      endAt <= startAt || (at > startAt && at > now)) {
+    throw new Error('Supply a valid meeting interval and an authorized reminder time in milliseconds.');
   }
+  if (endAt <= now || value.meeting.status === 'ended') throw new Error('The meeting has ended.');
   return {id,title,startAt,endAt,at};
 }
 
@@ -214,8 +217,14 @@ function calendar(value) {
   const safeTitle = title.replace(/\\/g,'\\\\').replace(/\r?\n|\r/g,'\\n').replace(/[;,]/g,'\\$&').replace(/[\x00-\x1f\x7f]/g,'');
   const lines = ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Junengliao//Meeting reminder//ZH-CN','BEGIN:VEVENT',
     'UID:' + id + '@junengliao', 'DTSTAMP:' + time(now),'DTSTART:' + time(startAt), 'DTEND:' + time(endAt),
-    'SUMMARY:' + safeTitle,'BEGIN:VALARM','TRIGGER;VALUE=DATE-TIME:' + time(Math.max(at,now)),'ACTION:DISPLAY',
-    'DESCRIPTION:' + safeTitle,'END:VALARM','END:VEVENT','END:VCALENDAR'];
+    'SUMMARY:' + safeTitle];
+  if (now < startAt) {
+    lines.push('BEGIN:VALARM','TRIGGER;VALUE=DATE-TIME:' + time(Math.max(at,now)),'ACTION:DISPLAY',
+      'DESCRIPTION:' + safeTitle,'END:VALARM');
+  } else {
+    console.error(joinNowMessage);
+  }
+  lines.push('END:VEVENT','END:VCALENDAR');
   return lines.flatMap(line => {
     const parts = [''];
     for (const char of line) {
@@ -243,7 +252,8 @@ async function waitReminder(manifest, flag) {
   while (Date.now() < at) await delay(Math.max(1,Math.min(at - Date.now(),60_000)));
   const firedAt = Date.now();
   if (firedAt >= endAt) throw new Error('The reminder process resumed after the meeting ended.');
-  return {event:'meeting-reminder',meetingId:id,title,startAt,scheduledAt:at,firedAt};
+  return {event:'meeting-reminder',meetingId:id,title,startAt,scheduledAt:at,firedAt,
+    ...(firedAt >= startAt && {joinNow:true,message:joinNowMessage})};
 }
 
 async function watchArchive(adapterPath, flag) {
