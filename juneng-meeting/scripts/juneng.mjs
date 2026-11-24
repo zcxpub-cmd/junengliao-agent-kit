@@ -2,12 +2,14 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
+import { isAbsolute } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { pathToFileURL } from 'node:url';
 
-const origin = process.env.JUNENG_ORIGIN;
+const origin = process.env.JUNENG_ORIGIN ?? 'https://meeting.sandboxai.cn';
 const api = '/api/v2';
 const meetingId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
-const fileLimit = 5 * 1024 * 1024;
+const receiptId = /^[a-zA-Z0-9_.:-]{1,128}$/;
 const feedbackKinds = {speech:'发言',task:'任务',attachment:'附件',seat:'席位'};
 const feedbackReasons = {privacy:'涉及隐私',abuse:'涉及骚扰或辱骂',illegal:'涉嫌违法',other:''};
 const feedbackMessages = {
@@ -38,7 +40,6 @@ function confirm(flag) {
 }
 
 function assertOrigin() {
-  if (!origin) throw new Error('Set JUNENG_ORIGIN to the trusted preview service origin before making a request.');
   const url = new URL(origin);
   if (url.origin !== origin || !['https:','http:'].includes(url.protocol) ||
       (url.protocol === 'http:' && url.hostname !== '127.0.0.1')) {
@@ -98,30 +99,32 @@ function showFeedback(rows, fallback) {
   if (rows.length === 0 && fallback) console.error('【聚能聊私下审核反馈】' + feedbackMessages[fallback]);
 }
 
-async function request(path, kind, body, binary = false) {
+async function request(path, kind, body, binary = false, abort) {
   assertOrigin();
   const target = new URL(path, origin);
   if (target.origin !== origin || !target.pathname.startsWith(api + '/')) throw new Error('Request is outside the configured API.');
+  const compactPresence = body?.compact === true && ['/agent/join','/agent/presence'].some((action) => path === api + action);
+  const timeout = AbortSignal.timeout(compactPresence ? 4_000 : path === api + '/agent/attachment' ? 180_000 : 45_000);
   const response = await fetch(target, {
     method: body === undefined ? 'GET' : 'POST', redirect:'error', credentials:'omit',
-    signal:AbortSignal.timeout(45_000),
+    signal:abort ? AbortSignal.any([abort,timeout]) : timeout,
     headers:{Accept:binary ? '*/*' : 'application/json',...(kind && {Authorization:'Bearer ' + token(kind)}),
       ...(body !== undefined && {'Content-Type':'application/json'})},
     ...(body !== undefined && {body:JSON.stringify(body)}),
   });
   if (!response.ok) {
     const info = await response.json().catch(() => null);
-    if (kind === 'agent') {
+    if (kind === 'agent' && !compactPresence) {
       const rows = Array.isArray(info?.moderationFeedback) ? info.moderationFeedback.map(safeFeedback).filter(Boolean) : [];
       const fallback = typeof info?.error === 'string' && Object.hasOwn(legacyFeedback,info.error) ? legacyFeedback[info.error] : null;
       showFeedback(rows,fallback);
     }
-    const code = typeof info?.error === 'string' && /^[a-z_]{2,90}$/.test(info.error) ? ' ' + info.error : '';
-    throw new Error(`API request failed (${response.status})${code}.`);
+    const code = typeof info?.error === 'string' && /^[a-z_]{2,90}$/.test(info.error) ? info.error : null;
+    throw Object.assign(new Error(`API request failed (${response.status})${code ? ' ' + code : ''}.`),{status:response.status,apiCode:code});
   }
   if (binary) return Buffer.from(await response.arrayBuffer());
   const result = await response.json();
-  if (kind === 'agent' && body !== undefined) {
+  if (kind === 'agent' && body !== undefined && !compactPresence) {
     const rows = Array.isArray(result?.moderationFeedback) ? result.moderationFeedback.map(safeFeedback).filter(Boolean) : [];
     if (Array.isArray(result?.moderationFeedback)) result.moderationFeedback = rows;
     showFeedback(rows,result?.status === 'pending_review' ? 'pending' : null);
@@ -146,38 +149,45 @@ function inviteToken(link) {
 
 async function share(command, flag) {
   confirm(flag);
-  const {id,filename,mime,size,sha256,content,videoUrl} = await object(Math.ceil(fileLimit / 3) * 4 + 32 * 1024);
-  const hasContent = content !== undefined;
-  const hasVideo = videoUrl !== undefined;
-  if ((hasContent && typeof content !== 'string') || (hasVideo && typeof videoUrl !== 'string')) {
-    throw new Error('File content and video URLs must be strings.');
-  }
-  const value = {id,filename,mime,size,sha256,content,videoUrl};
   const status = await request(api + '/agent','agent');
   const scope = status.self?.scope;
   if (!['approval','full'].includes(scope)) throw new Error('This seat has no attachment-sharing capability.');
-  if (hasContent && hasVideo) throw new Error('Select file content or an HTTPS video URL.');
-  if (hasVideo) {
-    const url = new URL(videoUrl);
-    if (url.protocol !== 'https:' || url.username || url.password) throw new Error('An HTTPS video link without credentials is required.');
-    value.videoUrl = url.href;
+  const hybrid = status.meeting?.kind === 'hybrid';
+  const maxMiB = hybrid ? 10 : 5;
+  const fileLimit = maxMiB * 1024 * 1024;
+  const {id,filename,mime,size,sha256,content,videoUrl,linkUrl} = await object(Math.ceil(fileLimit / 3) * 4 + 32 * 1024);
+  const hasContent = content !== undefined;
+  const links = Object.entries({videoUrl,linkUrl}).filter(([,url]) => url !== undefined);
+  if (links.length > 1 || (hasContent && links.length)) throw new Error('Select file content or one HTTPS link.');
+  if (hasContent && typeof content !== 'string') throw new Error('File content must be a string.');
+  if (linkUrl !== undefined && !hybrid) throw new Error('General links require a hybrid meeting.');
+  if (hybrid && !links.length && (['video/mp4','video/webm'].includes(mime) || /\.(mp4|webm)$/i.test(filename ?? ''))) {
+    throw new Error('Video uploads are unavailable in hybrid meetings.');
+  }
+  const value = {id,filename,mime,size,sha256,content};
+  const [linkField,rawLink] = links[0] ?? [];
+  if (linkField) {
+    const url = typeof rawLink === 'string' && URL.canParse(rawLink) ? new URL(rawLink) : null;
+    if (!url || url.protocol !== 'https:' || url.username || url.password) throw new Error('An HTTPS link without credentials is required.');
+    value[linkField] = url.href;
   }
   if (command === 'propose-attachment') {
     if (scope !== 'approval' || hasContent) throw new Error('Proposals use an approval seat and metadata only.');
   } else {
-    if (!hasContent && !hasVideo) throw new Error('File content or a video URL is required.');
+    if (!hasContent && !linkField) throw new Error('File content or an HTTPS link is required.');
     let bytes;
     if (hasContent) {
       bytes = Buffer.from(content,'base64');
       if (!bytes.length || bytes.length > fileLimit || bytes.toString('base64') !== content) {
-        throw new Error('Use canonical base64 with up to 5 MiB of file bytes.');
+        throw new Error('Use canonical base64 with up to ' + maxMiB + ' MiB of file bytes.');
       }
     }
     if (scope === 'approval') {
       const approved = status.approvals?.find(item => item.kind === 'attachment' && item.id === id && item.status === 'approved');
       if (!approved) throw new Error('The seat owner must approve this exact attachment in their browser first.');
-      if (approved.filename !== filename || approved.mime !== mime ||
-          (hasVideo ? approved.videoUrl !== value.videoUrl : approved.size !== bytes.length ||
+      const expectedMime = hybrid && linkField ? 'text/uri-list' : mime;
+      if (approved.filename !== filename || approved.mime !== expectedMime ||
+          (linkField ? (approved.linkUrl ?? approved.videoUrl) !== value[linkField] : approved.size !== bytes.length ||
             approved.sha256 !== createHash('sha256').update(bytes).digest('hex'))) {
         throw new Error('The supplied attachment differs from the browser-approved version.');
       }
@@ -236,6 +246,144 @@ async function waitReminder(manifest, flag) {
   return {event:'meeting-reminder',meetingId:id,title,startAt,scheduledAt:at,firedAt};
 }
 
+async function watchArchive(adapterPath, flag) {
+  confirm(flag);
+  assertOrigin();
+  token('agent');
+  if (!adapterPath || !isAbsolute(adapterPath)) throw new Error('Choose an explicitly authorized local host adapter by absolute path.');
+  const {default:adapter} = await import(pathToFileURL(adapterPath).href);
+  const {meetingId:roomId,agentId,sessionId} = adapter ?? {};
+  if (adapter?.origin !== origin || !meetingId.test(roomId ?? '') || !meetingId.test(agentId ?? '') ||
+      typeof sessionId !== 'string' || !sessionId.trim() || sessionId.length > 256 || /[\p{Cc}\p{Cf}]/u.test(sessionId) ||
+      typeof adapter.readArchiveMessage !== 'function' || typeof adapter.appendArchiveIfAbsent !== 'function') {
+    throw new Error('The host adapter has no valid original-session binding or archive capability.');
+  }
+  async function retry(path, body) {
+    for (;;) {
+      try { return await request(api + '/agent' + path,'agent',body); }
+      catch (error) {
+        if (!(error.status >= 500 || error.name === 'TimeoutError' || error instanceof TypeError)) throw error;
+        await delay(5000);
+      }
+    }
+  }
+  for (;;) {
+    const {meeting,self,archive} = await retry('?after=' + Number.MAX_SAFE_INTEGER);
+    if (meeting?.id !== roomId || self?.id !== agentId) throw new Error('The meeting or seat differs from the authorized host binding.');
+    if (meeting.status === 'ended') {
+      if (self.enteredAt == null) throw new Error('The bound seat never entered this meeting.');
+      if (archive?.sha256) {
+        if (archive.status === 'unavailable') throw new Error('AI minutes are unavailable. Use self to read the transcript.');
+        const {transcript,minutes,refs,sha256,status} = archive;
+        const complete = meeting.kind === 'free'
+          ? status === 'transcript-only' && minutes === null
+          : meeting.kind === 'scheduled' && status === 'ready' && typeof minutes === 'string' && minutes.trim();
+        const content = JSON.stringify({transcript,minutes,refs});
+        if (!complete || typeof transcript !== 'string' || !transcript.trim() || !Array.isArray(refs) ||
+            createHash('sha256').update(content).digest('hex') !== sha256) throw new Error('The archive or its digest could not be verified.');
+
+        const deliveryId = createHash('sha256').update(JSON.stringify([origin,roomId,agentId,sessionId,sha256])).digest('hex');
+        const target = {sessionId,deliveryId};
+        let proof;
+        try {
+          proof = await adapter.readArchiveMessage(target);
+          if (proof === null) {
+            await adapter.appendArchiveIfAbsent({...target,content});
+            proof = await adapter.readArchiveMessage(target);
+          }
+        } catch { throw new Error('The original host could not confirm its archive message. Retry with the same binding.'); }
+        if (proof?.sessionId !== sessionId || proof.deliveryId !== deliveryId || proof.content !== content ||
+            typeof proof.messageId !== 'string' || !receiptId.test(proof.messageId)) {
+          throw new Error('The complete archive could not be read back in the bound original session.');
+        }
+        const {messageId} = proof;
+        const ack = await retry('/archive-ack',{messageId,sha256});
+        if (ack?.acknowledged !== true) throw new Error('The archive receipt could not be recorded.');
+        return {meetingId:roomId,agentId,sessionId,deliveryId,messageId,sha256};
+      }
+    }
+    await delay(5000);
+  }
+}
+
+async function watchPresence(flag) {
+  confirm(flag);
+  assertOrigin();
+  token('agent');
+  const controller = new AbortController();
+  const {signal} = controller;
+  const stop = () => controller.abort();
+  process.on('SIGINT',stop);
+  process.on('SIGTERM',stop);
+  let binding;
+  let endAt;
+  const line = (event,fields) => JSON.stringify({event,...binding,...fields}) + '\n';
+  const call = (action,fields) => request(api + '/agent/' + action,'agent',{compact:true,...fields},false,signal);
+  const transient = (error) => error.status === 429 || error.status >= 500 ||
+    error.name === 'TimeoutError' || error instanceof TypeError;
+  async function renew() {
+    for (let attempt=0;;attempt++) {
+      try { return await call('presence'); }
+      catch (error) {
+        const remaining = endAt - Date.now();
+        if (signal.aborted || !transient(error) || attempt === 3 || remaining <= 0) throw error;
+        await delay(Math.min((attempt + 1) * 1_000,remaining),undefined,{signal});
+      }
+    }
+  }
+  function verify(reply) {
+    const {meeting,self} = reply ?? {};
+    if (!meetingId.test(meeting?.id ?? '') || !meetingId.test(self?.id ?? '') || !Number.isSafeInteger(meeting.endAt) ||
+        (binding && (binding.meetingId !== meeting.id || binding.agentId !== self.id || endAt !== meeting.endAt))) {
+      throw new Error('The compact presence receipt did not match the bound meeting and seat.');
+    }
+    binding ??= {meetingId:meeting.id,agentId:self.id};
+    endAt ??= meeting.endAt;
+    if (meeting.status === 'ended') return false;
+    if (!['scheduled','running','paused'].includes(meeting.status) ||
+        !['present','thinking'].includes(self.status) || !Number.isSafeInteger(self.onlineUntil)) {
+      throw new Error('The compact presence receipt did not confirm an active lease.');
+    }
+    return true;
+  }
+  try {
+    // Never repeat an ambiguous explicit join. Recovery uses a reconnect-only request.
+    const joined = await call('join');
+    if (!verify(joined)) return line('presence-ended',{reason:'meeting-ended'});
+    process.stdout.write(line('presence-ready',{onlineUntil:joined.self.onlineUntil}));
+    let recovering = false;
+    for (;;) {
+      await delay(recovering ? Math.max(1,Math.min(4_000,endAt - Date.now())) : 10_000,undefined,{signal});
+      if (recovering && Date.now() >= endAt) return line('presence-ended',{reason:'scheduled-end'});
+      let receipt;
+      let reconnected = false;
+      try {
+        try { receipt = await renew(); }
+        catch (error) {
+          if (error.status !== 409 || error.apiCode !== 'meeting_agent_offline') throw error;
+          receipt = await call('join',{reconnect:true});
+          reconnected = true;
+        }
+      } catch (error) {
+        if (signal.aborted || !transient(error)) throw error;
+        if (Date.now() >= endAt) return line('presence-ended',{reason:'scheduled-end'});
+        recovering = true;
+        continue;
+      }
+      if (!verify(receipt)) return line('presence-ended',{reason:'meeting-ended'});
+      recovering = false;
+      if (reconnected) process.stdout.write(line('presence-reconnected',{onlineUntil:receipt.self.onlineUntil}));
+    }
+  } catch (error) {
+    if (signal.aborted) return line('presence-ended',{reason:'stopped'});
+    if (error.status === 409 && error.apiCode === 'meeting_ended') return line('presence-ended',{reason:'meeting-ended'});
+    throw error;
+  } finally {
+    process.removeListener('SIGINT',stop);
+    process.removeListener('SIGTERM',stop);
+  }
+}
+
 async function main([command,first,second,third]) {
   switch (command) {
     case 'list': return request(api + '/meetings','account');
@@ -248,8 +396,8 @@ async function main([command,first,second,third]) {
       return request(room(first) + '/mode','account',{mode:second});
     case 'end': confirm(second); return request(room(first) + '/end','account',{});
     case 'inspect-invite': {
-      const {meeting,loginRequired,protocol,requirements} = await request(api + '/invitations/' + inviteToken(await input(2048)));
-      return {meeting,loginRequired,protocol,requirements};
+      const {meeting,loginRequired,protocol,requirements,speechGuidance} = await request(api + '/invitations/' + inviteToken(await input(2048)));
+      return {meeting,loginRequired,protocol,requirements,speechGuidance};
     }
     case 'self': {
       if (first === undefined) return request(api + '/agent','agent');
@@ -275,6 +423,7 @@ async function main([command,first,second,third]) {
       confirm(second);
       if (!['present','thinking'].includes(first)) throw new Error('Presence must be present or thinking.');
       return request(api + '/agent/presence','agent',{status:first});
+    case 'presence-watch': return watchPresence(first);
     case 'task': {
       confirm(first);
       const {id,text} = await object();
@@ -282,20 +431,32 @@ async function main([command,first,second,third]) {
     }
     case 'speech':
     case 'archive-ack': confirm(first); return request(api + '/agent/' + command,'agent',await object());
+    case 'archive-watch': return watchArchive(first,second);
     case 'propose-attachment':
     case 'attachment': return share(command,first);
-    case 'download': {
-      if (!['account','agent'].includes(first)) throw new Error('Choose an explicit download role.');
+    case 'download':
+    case 'open-link': {
+      if (!['account','agent'].includes(first)) throw new Error('Choose an explicit attachment role.');
+      const opening = command === 'open-link';
+      if (opening) confirm(second);
+      assertOrigin();
       const url = new URL((await input(2048)).trim(),origin);
+      const path = opening ? url.pathname.replace(/\/open$/u,'') : url.pathname;
       if (url.origin !== origin || url.username || url.password || url.search || url.hash ||
-          !/^\/api\/v2\/meetings\/[a-f0-9-]{36}\/attachments\/[A-Za-z0-9_-]{1,128}$/.test(url.pathname)) {
+          !/^\/api\/v2\/meetings\/[a-f0-9-]{36}\/attachments\/[A-Za-z0-9_-]{1,128}$/.test(path)) {
         throw new Error('Use the returned same-origin meeting attachment URL.');
       }
-      return request(url.pathname,first,undefined,true);
+      if (!opening) return request(path,first,undefined,true);
+      const {opened,linkUrl} = await request(path + '/open',first,{});
+      const target = typeof linkUrl === 'string' && URL.canParse(linkUrl) ? new URL(linkUrl) : null;
+      if (opened !== true || target?.protocol !== 'https:' || target.username || target.password) {
+        throw new Error('The meeting service did not confirm an HTTPS link attachment.');
+      }
+      return {opened,linkUrl};
     }
     case 'reminder': confirm(first); return calendar(await object());
     case 'wait-reminder': return waitReminder(first,second);
-    default: throw new Error('Commands: list, view, agenda, create, mode, end, inspect-invite, self [after], feedback [after], join, leave, presence, speech, task, propose-attachment, attachment, download, archive-ack, reminder, wait-reminder.');
+    default: throw new Error('Commands: list, view, agenda, create, mode, end, inspect-invite, self [after], feedback [after], join, leave, presence, presence-watch, speech, task, propose-attachment, attachment, download, open-link, archive-ack, archive-watch, reminder, wait-reminder.');
   }
 }
 
