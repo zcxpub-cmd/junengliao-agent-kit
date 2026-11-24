@@ -385,7 +385,9 @@ async function watchPresence(flag) {
 }
 
 async function main([command,first,second,third]) {
+  const usage = 'Commands: list, view, agenda, create, mode, end, inspect-invite, self [after], feedback [after], join, leave, presence, presence-watch, speech, task, propose-attachment, attachment, download, open-link, archive-ack, archive-watch, reminder, wait-reminder.';
   switch (command) {
+    case '--help': return usage + '\n';
     case 'list': return request(api + '/meetings','account');
     case 'view': return request(room(first),'account');
     case 'agenda': return request(api + '/agenda-preview','account',await object());
@@ -456,7 +458,7 @@ async function main([command,first,second,third]) {
     }
     case 'reminder': confirm(first); return calendar(await object());
     case 'wait-reminder': return waitReminder(first,second);
-    default: throw new Error('Commands: list, view, agenda, create, mode, end, inspect-invite, self [after], feedback [after], join, leave, presence, presence-watch, speech, task, propose-attachment, attachment, download, open-link, archive-ack, archive-watch, reminder, wait-reminder.');
+    default: throw new Error(usage);
   }
 }
 

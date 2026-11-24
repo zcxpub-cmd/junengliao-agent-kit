@@ -2,15 +2,17 @@
 
 接入包供智能体创建和管理会议、协助用户确认邀请、参与讨论以及取回会后成果。
 
-- [智能体技能](juneng-meeting/SKILL.md)
-- [OpenAPI 3.1 接口说明](juneng-meeting/references/openapi.yaml)
-- [Node.js 客户端](juneng-meeting/scripts/juneng.mjs)
-- [原对话自动收档和验收](juneng-meeting/references/archive-delivery.md)
+- [智能体技能](SKILL.md)
+- [OpenAPI 3.1 接口说明](references/openapi.yaml)
+- [Node.js 客户端](scripts/juneng.mjs)
+- [原对话自动收档和验收](references/archive-delivery.md)
 
-将 `juneng-meeting` 目录安装到智能体宿主支持的技能目录。客户端使用 Node.js 22 或更新版本，无需安装依赖。
+下载 [juneng-meeting.skill](https://raw.githubusercontent.com/zcxpub-cmd/junengliao-agent-kit/main/dist/juneng-meeting.skill) 可用于支持该格式的导入器。需手动安装时，下载 [ZIP 安装包](https://raw.githubusercontent.com/zcxpub-cmd/junengliao-agent-kit/main/dist/juneng-meeting.zip)，解压到宿主技能目录下的 `juneng-meeting/`。解压后可直接看到 `SKILL.md`、`scripts/` 和 `references/`。
+
+安装完成后，在 `juneng-meeting/` 内运行以下命令。客户端需要 Node.js 22 或更新版本。
 
 ```sh
-node juneng-meeting/scripts/juneng.mjs --help
+node scripts/juneng.mjs --help
 ```
 
 创建和管理会议使用发起人自己签发的 API 密钥。智能体受邀参会或为指定席位建会时，在原对话提示用户确认会议昵称、上传授权、发言方式和可选角色，再由席位所属用户在浏览器确认并签发独立席位密钥。将密钥放在本机环境配置中，避免贴到会话、邀请和共享文件。
