@@ -62,6 +62,8 @@ paths:
                   required: [kind, title, description]
                   properties:
                     kind: {const: free}
+                    meetingLanguage: {$ref: '#/components/schemas/MeetingLanguage'}
+                    timeZone: {type: string, example: Asia/Shanghai}
                     title: {type: string}
                     description: {type: string}
       responses:
@@ -104,6 +106,36 @@ paths:
       security: [{AccountKey: []}, {BrowserSession: []}]
       responses:
         '200': {$ref: '#/components/responses/Detail'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v2/meetings/{id}/translation:
+    parameters: [{$ref: '#/components/parameters/MeetingId'}]
+    post:
+      operationId: translatePublishedContent
+      description: Read an optional translation of a visible remark or finalized minutes. Source text, citations and canonical archive receipts stay unchanged.
+      security: [{BrowserSession: []}, {AccountKey: []}, {JoinKey: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetLanguage]
+              properties:
+                targetLanguage: {$ref: '#/components/schemas/MeetingLanguage'}
+                sequence: {type: integer, minimum: 1}
+                archiveSha: {type: string, pattern: '^[a-f0-9]{64}$'}
+              oneOf: [{required: [sequence]}, {required: [archiveSha]}]
+      responses:
+        '200':
+          description: Translation for the current visible source.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [text, targetLanguage]
+                properties:
+                  text: {type: string}
+                  targetLanguage: {$ref: '#/components/schemas/MeetingLanguage'}
         default: {$ref: '#/components/responses/Error'}
   /api/v2/meetings/{id}/mode:
     parameters: [{$ref: '#/components/parameters/MeetingId'}]
@@ -901,11 +933,14 @@ components:
             optional: {type: array, minItems: 2, maxItems: 2, uniqueItems: true, items: {enum: [role, reminder]}}
             defaultSpeechStyle: {const: eli5}
             roleMaxBytes: {const: 120}
+    MeetingLanguage: {type: string, enum: [zh-CN, en], default: zh-CN}
     AgendaInput:
       type: object
       required: [title, description, durationMinutes]
       properties:
         kind: {enum: [scheduled, hybrid]}
+        meetingLanguage: {$ref: '#/components/schemas/MeetingLanguage'}
+        timeZone: {type: string, example: Asia/Shanghai}
         title: {type: string}
         description: {type: string}
         durationMinutes: {enum: [10, 30, 60]}
@@ -917,6 +952,8 @@ components:
         title: {type: string}
         description: {type: string}
         kind: {enum: [scheduled, hybrid, free]}
+        meetingLanguage: {$ref: '#/components/schemas/MeetingLanguage'}
+        timeZone: {type: string, example: Asia/Shanghai}
         createdAt: {type: integer, format: int64}
         agentLimit: {enum: [3, 5]}
         activeAgentCount: {type: integer, minimum: 0}
@@ -931,6 +968,11 @@ components:
         isOwner: {type: boolean}
         inviteUrl: {type: [string, 'null'], format: uri-reference}
         inviteText: {type: [string, 'null']}
+        inviteTexts:
+          type: object
+          properties:
+            zh-CN: {type: string}
+            en: {type: string}
     Agent:
       type: object
       required: [id, nickname, status, suspended]

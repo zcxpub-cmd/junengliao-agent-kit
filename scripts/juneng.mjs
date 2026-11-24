@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 
 const origin = process.env.JUNENG_ORIGIN ?? 'https://meeting.sandboxai.cn';
 const api = '/api/v2';
+const english = process.env.JUNENG_LOCALE === 'en';
 const meetingId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const receiptId = /^[a-zA-Z0-9_.:-]{1,128}$/;
 const feedbackKinds = {speech:'发言',task:'任务',attachment:'附件',seat:'席位'};
@@ -34,6 +35,20 @@ const legacyFeedback = {
   meeting_content_revise:'revise',meeting_content_blocked:'blocked',
   meeting_content_unavailable:'unavailable',meeting_agent_suspended:'suspended',
 };
+const feedbackEn = {
+  pass:'Approved and published.', pending:'Awaiting review. The content is not public.',
+  revise:'Please revise before publishing. Use a new request ID for the edited content.',
+  blocked:'Blocked. The content was not published. Do not resubmit it.',
+  unavailable:'Review is unavailable. The content is not public. Retry the same request later if still authorized.',
+  allowed:'Approved on review. Retry the original content and request ID, then check its publication receipt.',
+  expired:'Review expired before publication.', reported:'A report is awaiting review.',
+  dismissed:'The report was dismissed.', withdrawn:'Distribution stopped. Stop citing or sharing this content.',
+  appeal_pending:'The appeal is awaiting review.', appeal_granted:'Appeal granted. Ask the user to check the result in the meeting.',
+  appeal_upheld:'The original decision stands. Ask the user to check the result in the meeting.',
+  suspended:'This seat has been suspended. Wait for reinstatement before submitting.',
+  restored:'Your seat has been restored. You may rejoin under your existing permissions.',
+  warning:'Review the moderation notice and check whether the content is public.',
+};
 
 function confirm(flag) {
   if (flag !== '--confirm') throw new Error('This operation requires the user authorization indicated by --confirm.');
@@ -49,7 +64,14 @@ function assertOrigin() {
 
 function token(kind) {
   const value = process.env[kind === 'account' ? 'JUNENG_API_KEY' : 'JUNENG_JOIN_KEY'];
-  if (!/^[a-zA-Z0-9_-]{43}$/.test(value ?? '')) throw new Error('Missing or invalid role-specific bearer token.');
+  if (!/^[a-zA-Z0-9_-]{43}$/.test(value ?? '')) {
+    if (english) throw new Error(kind === 'account'
+      ? 'Sign in and generate an account API key. Configure JUNENG_API_KEY privately in this host.'
+      : 'Open the invitation, sign in and confirm the seat. Configure JUNENG_JOIN_KEY privately in the original conversation host.');
+    throw new Error(kind === 'account'
+      ? '缺少有效的账号 API 密钥。请本人登录聚能聊，在「API」生成密钥，并在原宿主私下配置 JUNENG_API_KEY。请勿把密钥发到对话里。'
+      : '缺少有效的参会席位密钥。请本人在浏览器打开邀请，登录并确认本智能体席位，然后在该原对话的私密配置中设置 JUNENG_JOIN_KEY。请勿把密钥发到对话里。');
+  }
   return value;
 }
 
@@ -68,6 +90,81 @@ async function object(maximum) {
   const value = JSON.parse(await input(maximum));
   if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('A JSON object on standard input is required.');
   return value;
+}
+
+function draftText(value, field, maxBytes) {
+  if (typeof value !== 'string' || !value.trim() || !value.isWellFormed() ||
+      Buffer.byteLength(value) > maxBytes || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value)) {
+    throw new Error(field + ' 需要填写有效文字，最长 ' + maxBytes + ' 字节。');
+  }
+  return value.trim().replace(/\s+/gu,' ').replace(/[\\`*_\[\]<>]/gu,'\\$&');
+}
+
+function draftList(value, field, maxBytes) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error(field + ' 需要使用字符串数组。');
+  return [...new Set(value.map(item => draftText(item,field,maxBytes)))];
+}
+
+function draftAgenda(data) {
+  if (Object.keys(data).some(key => !['title','objective','durationMinutes','options','participants','meetingLanguage'].includes(key))) {
+    throw new Error('草案仅接收 title、objective、durationMinutes，以及可选的 options 和 participants。');
+  }
+  if (data.meetingLanguage !== undefined && !['en','zh-CN'].includes(data.meetingLanguage)) {
+    throw new Error('Use en or zh-CN for meetingLanguage.');
+  }
+  const title = draftText(data.title,'title（会议主题）',240);
+  const objective = draftText(data.objective,'objective（会议目标）',6000);
+  const duration = data.durationMinutes;
+  if (!Number.isInteger(duration) || duration < 1 || duration > 120) {
+    throw new Error('durationMinutes 需要填写 1 到 120 分钟之间的整数。');
+  }
+  const options = draftList(data.options,'options（备选方案）',600);
+  const people = draftList(data.participants,'participants（拟邀参与者）',96);
+  let compare = '提出一种可行做法，用当前做法作对照。分别列出需要的资源和现有证据。';
+  if (options.length === 1) compare = '把「' + options[0] + '」与维持现状比较。哪项投入会增加，哪项结果有望改善？';
+  if (options.length >= 2) compare = '逐项比较' + (options.length === 2 ? '「' + options.join('」与「') + '」' : '上述备选方案') +
+    '。在相同资源和时间下，各自最可能改善哪个指标，代价是什么？哪些判断仍缺证据？';
+  const opening = '围绕会议目标，选定一个能观察的指标，约定什么变化算有效。';
+  const verify = '选一个最需要核实的判断，约定试验对象、对照做法、记录指标和观察期限。';
+  const close = '分别记录已有依据、分歧及待核实项，现场确认验证负责人和反馈日期。';
+  let stages;
+  if (duration === 1) {
+    stages = [[1,'确定优先问题','围绕目标挑出一个待核实的判断，说清下一步用什么数据验证，余下事项待讨论。']];
+  } else if (duration < 4) {
+    stages = [[1,'比较可行做法',compare],[1,'约定最小验证','约定一个对照做法、一个指标，以及谁在何时反馈。']];
+    if (duration === 3) stages.unshift([1,'确定判断标准',opening]);
+  } else {
+    const openingMinutes = Math.max(1,Math.floor(duration * .2));
+    const compareMinutes = Math.max(1,Math.floor(duration * .4));
+    const verifyMinutes = Math.max(1,Math.floor(duration * .3));
+    stages = [[openingMinutes,'确定判断标准',opening],[compareMinutes,'比较可行做法',compare],
+      [verifyMinutes,'设计验证',verify],[duration-openingMinutes-compareMinutes-verifyMinutes,'明确后续动作',close]];
+  }
+  if ((data.meetingLanguage ?? (english ? 'en' : 'zh-CN')) === 'en') {
+    const compareOptions = options.length ? options.join(' or ') : 'one practical option and the current approach';
+    const lines = {
+      '确定优先问题':['Pick a question','Choose the most important uncertainty and name the evidence needed.'],
+      '比较可行做法':['Compare options','Compare ' + compareOptions + '. What might improve, at what cost, and what evidence is missing?'],
+      '约定最小验证':['Agree on a test','Choose a baseline, a measure, an owner and a date.'],
+      '确定判断标准':['Agree on a measure','Choose an observable measure and define what improvement would count.'],
+      '设计验证':['Design the test','Choose a group, a baseline, a measure and an observation period.'],
+      '明确后续动作':['Next steps','Record decisions, disagreements and open questions. Confirm owners and follow-up dates.'],
+    };
+    return ['# Meeting agenda draft','',title,'','**Objective** ' + objective,'','**Duration** ' + duration + ' min',
+      '**Status** Local draft. No meeting has been created.','**Invitees** ' + (people.join(', ') || 'To be confirmed'),
+      '**Options** ' + (options.join(', ') || 'To be proposed'),'','## Discussion','',
+      ...stages.map(([minutes,key],i) => (i + 1) + '. **' + minutes + ' min · ' + lines[key][0] + '** ' + lines[key][1]),
+      '','Confirm the start time, time zone, attendees and agenda before creating the meeting.',''].join('\n');
+  }
+  return [
+    '# 会议议程草案','','**主题** ' + title,'','**目标** ' + objective,'','**时长** ' + duration + ' 分钟',
+    '','**状态** 本地草案，尚未建会。','','**拟邀参与者** ' + (people.join('、') || '待确认'),
+    '','**备选方案** ' + (options.join('、') || '待讨论提出'),'','## 讨论安排','',
+    ...stages.map(([minutes,label,activity],index) => `${index + 1}. **${minutes} 分钟 · ${label}**　${activity}`),
+    '','## 会前待确认','','- 目标、备选范围和时间分配是否合适？',
+    '- 谁需要参加，谁能提供当前数据或实例？','- 如需正式建会，请确认开始时间、时区和最终议程。','',
+  ].join('\n');
 }
 
 function safeFeedback(value) {
@@ -93,10 +190,15 @@ function showFeedback(rows, fallback) {
     const target = row.clientId ? ' · 请求 ' + row.clientId : '';
     const reason = feedbackReasons[row.reason];
     const explanation = row.resolution ? '人工复核说明：「' + row.resolution + '」' : '';
-    console.error('【聚能聊私下审核反馈 #' + row.sequence + '】' + feedbackKinds[row.kind] + target + '：' +
+    if (english) {
+      const info = [row.clientId, row.reason === 'other' ? '' : row.reason, row.resolution].filter(Boolean).join(' · ');
+      console.error('[Private moderation feedback #' + row.sequence + '] ' + row.kind + ': ' +
+        feedbackEn[row.status] + (info ? ' ' + info : ''));
+    } else console.error('【聚能聊私下审核反馈 #' + row.sequence + '】' + feedbackKinds[row.kind] + target + '：' +
       feedbackMessages[row.status] + (reason ? '原因：' + reason + '。' : '') + explanation);
   }
-  if (rows.length === 0 && fallback) console.error('【聚能聊私下审核反馈】' + feedbackMessages[fallback]);
+  if (rows.length === 0 && fallback) console.error(english
+    ? '[Private moderation feedback] ' + feedbackEn[fallback] : '【聚能聊私下审核反馈】' + feedbackMessages[fallback]);
 }
 
 async function request(path, kind, body, binary = false, abort) {
@@ -137,12 +239,27 @@ function room(id) {
   return api + '/meetings/' + id;
 }
 
-function inviteToken(link) {
+function inviteToken(input) {
   assertOrigin();
-  const value = new URL(link.trim());
+  const lines = input.trim().split(/\r?\n/u);
+  let link = lines[0];
+  const invalid = english ? 'Provide the original Junengliao invitation or meeting link.' : '请提供聚能聊的完整邀请文字或本站会议链接，链接格式为 /#invite-v2=…。';
+  if (new Set(input.match(/(?:https?:)?\/\/\S+/giu)).size > 1) {
+    throw new Error(english ? 'Supply just one meeting link.' : '发现多个不同链接。请单独提供你要核对的会议链接。');
+  }
+  if (lines.length > 1) {
+    const zh = ['聚能聊会议邀请','聚能聊人机协同会议邀请','聚能聊自由交流邀请'].includes(lines[0]);
+    const en = ['Junengliao · AI meeting invitation','Junengliao · Human–AI meeting invitation','Junengliao · Open discussion invitation'].includes(lines[0]);
+    if (!zh && !en) throw new Error(invalid);
+    const position = lines.indexOf(zh ? '打开链接查看会议并确认参会' : 'Open the meeting and confirm your attendance');
+    if (position < 0) throw new Error(invalid);
+    link = lines[position + 1] ?? '';
+  }
+  if (!/^https?:\/\/[^\s\\@/?#]+\/?#invite-v2=/iu.test(link) || !URL.canParse(link)) throw new Error(invalid);
+  const value = new URL(link);
   const fragment = /^#invite-v2=([A-Za-z0-9_-]{43})$/.exec(value.hash);
   if (value.origin !== origin || value.username || value.password || value.pathname !== '/' || value.search || !fragment) {
-    throw new Error('The invitation must match the configured origin and canonical meeting link format.');
+    throw new Error(invalid);
   }
   return fragment[1];
 }
@@ -196,7 +313,8 @@ async function share(command, flag) {
   return request(api + '/agent/attachment','agent',value);
 }
 
-const joinNowMessage = '已到参会时间。已获本席入会授权时，请在原对话立即运行 presence-watch --confirm，并核对入会回执。';
+const joinNowMessage = english ? 'It is time to join. With seat authorization, run presence-watch --confirm in the original conversation and check the entry receipt.'
+  : '已到参会时间。已获本席入会授权时，请在原对话立即运行 presence-watch --confirm，并核对入会回执。';
 
 function reminderSchedule(value, now) {
   const {id,title,startAt,endAt} = value?.meeting ?? {};
@@ -287,7 +405,7 @@ async function watchArchive(adapterPath, flag) {
         const {transcript,minutes,refs,sha256,status} = archive;
         const complete = meeting.kind === 'free'
           ? status === 'transcript-only' && minutes === null
-          : meeting.kind === 'scheduled' && status === 'ready' && typeof minutes === 'string' && minutes.trim();
+          : ['scheduled','hybrid'].includes(meeting.kind) && status === 'ready' && typeof minutes === 'string' && minutes.trim();
         const content = JSON.stringify({transcript,minutes,refs});
         if (!complete || typeof transcript !== 'string' || !transcript.trim() || !Array.isArray(refs) ||
             createHash('sha256').update(content).digest('hex') !== sha256) throw new Error('The archive or its digest could not be verified.');
@@ -395,9 +513,10 @@ async function watchPresence(flag) {
 }
 
 async function main([command,first,second,third]) {
-  const usage = 'Commands: list, view, agenda, create, mode, end, inspect-invite, self [after], feedback [after], join, leave, presence, presence-watch, speech, task, propose-attachment, attachment, download, open-link, archive-ack, archive-watch, reminder, wait-reminder.';
+  const usage = 'Commands: draft, list, view, agenda, create, mode, end, inspect-invite, self [after], feedback [after], join, leave, presence, presence-watch, speech, task, propose-attachment, attachment, download, open-link, archive-ack, archive-watch, reminder, wait-reminder.';
   switch (command) {
     case '--help': return usage + '\n';
+    case 'draft': return draftAgenda(await object());
     case 'list': return request(api + '/meetings','account');
     case 'view': return request(room(first),'account');
     case 'agenda': return request(api + '/agenda-preview','account',await object());
@@ -408,7 +527,7 @@ async function main([command,first,second,third]) {
       return request(room(first) + '/mode','account',{mode:second});
     case 'end': confirm(second); return request(room(first) + '/end','account',{});
     case 'inspect-invite': {
-      const {meeting,loginRequired,protocol,requirements,speechGuidance} = await request(api + '/invitations/' + inviteToken(await input(2048)));
+      const {meeting,loginRequired,protocol,requirements,speechGuidance} = await request(api + '/invitations/' + inviteToken(await input()));
       return {meeting,loginRequired,protocol,requirements,speechGuidance};
     }
     case 'self': {
