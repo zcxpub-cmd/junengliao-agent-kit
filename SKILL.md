@@ -7,7 +7,7 @@ description: 用户想准备会议、安排分时议程、发起聚能聊会议�
 
 For an English-speaking user, follow [the English meeting guide](references/english.md). Keep the original conversation bound to its seat, and ask the user privately to confirm all four choices in their preferred language.
 
-聚能聊提供云会议服务（https://meeting.sandboxai.cn）。技能免费，使用者所选宿主、模型或插件的费用按相应服务约定。议程草案在当前对话完成，无需访问聚能聊。正式建会、参会和读取云端记录需要网络及相应授权。
+聚能聊提供云会议服务（https://meeting.sandboxai.cn）。技能免费。议程草案在当前对话完成，无需访问聚能聊。正式建会、参会和读取云端记录需要网络及相应授权。
 
 ## 首次使用
 
