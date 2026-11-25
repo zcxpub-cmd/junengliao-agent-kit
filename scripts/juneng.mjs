@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
+import { finishAuth, savedAccountKey, startAuth } from './account-auth.mjs';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
@@ -63,13 +64,13 @@ function assertOrigin() {
 }
 
 function token(kind) {
-  const value = process.env[kind === 'account' ? 'JUNENG_API_KEY' : 'JUNENG_JOIN_KEY'];
+  const value = kind === 'account' ? savedAccountKey(origin) ?? process.env.JUNENG_API_KEY : process.env.JUNENG_JOIN_KEY;
   if (!/^[a-zA-Z0-9_-]{43}$/.test(value ?? '')) {
     if (english) throw new Error(kind === 'account'
-      ? 'Sign in and generate an account API key. Configure JUNENG_API_KEY privately in this host.'
+      ? 'Run auth-start and show the user the approval link and check code. The agent finishes with auth-finish.'
       : 'Open the invitation, sign in and confirm the seat. Configure JUNENG_JOIN_KEY privately in the original conversation host.');
     throw new Error(kind === 'account'
-      ? '缺少有效的账号 API 密钥。请本人登录聚能聊，在「API」生成密钥，并在原宿主私下配置 JUNENG_API_KEY。请勿把密钥发到对话里。'
+      ? '请由智能体运行 auth-start，向用户展示授权链接和核对码。用户同意后运行 auth-finish 即可。'
       : '缺少有效的参会席位密钥。请本人在浏览器打开邀请，登录并确认本智能体席位，然后在该原对话的私密配置中设置 JUNENG_JOIN_KEY。请勿把密钥发到对话里。');
   }
   return value;
@@ -222,7 +223,10 @@ async function request(path, kind, body, binary = false, abort) {
       showFeedback(rows,fallback);
     }
     const code = typeof info?.error === 'string' && /^[a-z_]{2,90}$/.test(info.error) ? info.error : null;
-    throw Object.assign(new Error(`API request failed (${response.status})${code ? ' ' + code : ''}.`),{status:response.status,apiCode:code});
+    const reconnect = kind === 'account' && response.status === 401
+      ? (english ? ' Account access ended. Run auth-start to reconnect with user approval.' : ' 账号授权已失效。如需继续，请重新运行 auth-start 并取得用户同意。') : '';
+    throw Object.assign(new Error(`API request failed (${response.status})${code ? ' ' + code : ''}.` + reconnect),
+      {status:response.status,apiCode:code,retryAfter:Number(response.headers.get('Retry-After'))});
   }
   if (binary) return Buffer.from(await response.arrayBuffer());
   const result = await response.json();
@@ -513,10 +517,12 @@ async function watchPresence(flag) {
 }
 
 async function main([command,first,second,third]) {
-  const usage = 'Commands: draft, list, view, agenda, create, mode, end, inspect-invite, self [after], feedback [after], join, leave, presence, presence-watch, speech, task, propose-attachment, attachment, download, open-link, archive-ack, archive-watch, reminder, wait-reminder.';
+  const usage = 'Commands: draft, auth-start [agent name], auth-finish, list, view, agenda, create, mode, end, inspect-invite, self [after], feedback [after], join, leave, presence, presence-watch, speech, task, propose-attachment, attachment, download, open-link, archive-ack, archive-watch, reminder, wait-reminder.';
   switch (command) {
     case '--help': return usage + '\n';
     case 'draft': return draftAgenda(await object());
+    case 'auth-start': assertOrigin(); return startAuth(origin,request,first);
+    case 'auth-finish': assertOrigin(); return finishAuth(origin,request);
     case 'list': return request(api + '/meetings','account');
     case 'view': return request(room(first),'account');
     case 'agenda': return request(api + '/agenda-preview','account',await object());
