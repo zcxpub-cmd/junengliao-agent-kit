@@ -4,9 +4,9 @@
 
 接入包供智能体创建和管理会议、协助用户确认邀请、参与讨论以及取回会后成果。
 
-**2026-11-25 更新。** 技能 2.1.2 已加入浏览器授权。官方站点启用配套服务后，用户即可在浏览器确认连接。当前可继续在原对话免费起草议程，已配置账号密钥的智能体也可继续管理会议。
+**首次连接**　安装技能后，在原对话里说“连接我的聚能聊账号”。智能体会给你一个授权链接和六位核对码。
 
-Browser approval is included in skill 2.1.2 and will be available when the hosted service enables it. Local agenda drafts and existing account API keys continue to work.
+**First connection**　Ask your agent in the current chat to connect your Junengliao account. Open the link, check your account and the matching six-digit code, then select **Approve and connect**.
 
 - [智能体技能](SKILL.md)
 - [OpenAPI 3.1 接口说明](references/openapi.yaml)
