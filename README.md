@@ -15,6 +15,10 @@
 
 下载 [juneng-meeting.skill](https://raw.githubusercontent.com/zcxpub-cmd/junengliao-agent-kit/main/dist/juneng-meeting.skill) 可用于支持该格式的导入器。需手动安装时，下载 [ZIP 安装包](https://raw.githubusercontent.com/zcxpub-cmd/junengliao-agent-kit/main/dist/juneng-meeting.zip)，解压到宿主技能目录下的 `juneng-meeting/`。解压后可直接看到 `SKILL.md`、`scripts/` 和 `references/`。
 
+官网和 GitHub 直装版安装一次带更新功能的版本后，每次调用都会从聚能聊官网检查发行版本。通过签名校验后，本次即运行新版。断网或检查失败时沿用已有可用版本，进行中的会议监听继续使用启动时的版本。可运行 `node scripts/juneng.mjs --version` 查看本次实际版本。需要关闭自动更新时，设置 `JUNENG_AUTO_UPDATE=0` 即可固定使用安装包自带版本。
+
+Install the update-enabled version once. Direct installs check the official site on each invocation, verify the signed release, then run the newest verified version available. If the check fails, the installed or last verified version remains usable. WorkBuddy marketplace installs receive reviewed versions through WorkBuddy.
+
 提交 WorkBuddy 开放平台或手动复核市场版时，请使用 [WorkBuddy 专用 ZIP](https://raw.githubusercontent.com/zcxpub-cmd/junengliao-agent-kit/main/dist/juneng-meeting-workbuddy.zip)，其中包含平台要求的中英文展示资料。
 
 安装完成后，在 `juneng-meeting/` 内运行以下命令。客户端需要 Node.js 22 或更新版本。
